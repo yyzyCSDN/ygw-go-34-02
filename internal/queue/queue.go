@@ -73,3 +73,21 @@ func (q *Queue) Snapshot() []model.Task {
 	copy(out, q.items)
 	return out
 }
+
+// Drain atomically removes and returns every queued task ordered from
+// earliest to latest due time. Because the whole queue is consumed under
+// one lock, a task enqueued after Drain returns is not part of its
+// result and stays in the queue for a later window. A caller that needs
+// to keep a task (for example one that is not due yet) re-enqueues it.
+func (q *Queue) Drain() []model.Task {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		return nil
+	}
+	out := make([]model.Task, 0, len(q.items))
+	for len(q.items) > 0 {
+		out = append(out, heap.Pop(&q.items).(model.Task))
+	}
+	return out
+}

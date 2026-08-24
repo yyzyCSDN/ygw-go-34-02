@@ -57,6 +57,36 @@ func TestQueuePeekAndSnapshot(t *testing.T) {
 	}
 }
 
+func TestQueueDrainOrdersAndClears(t *testing.T) {
+	q := New(8)
+	base := mustTime()
+	first := model.NewTask("g", []byte("1"), base)
+	second := model.NewTask("g", []byte("2"), base.Add(1))
+	if err := q.Enqueue(second); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Enqueue(first); err != nil {
+		t.Fatal(err)
+	}
+	got := q.Drain()
+	if len(got) != 2 {
+		t.Fatalf("drain len = %d, want 2", len(got))
+	}
+	if got[0].ID != first.ID || got[1].ID != second.ID {
+		t.Fatalf("drain order = [%s, %s], want [%s, %s]", got[0].ID, got[1].ID, first.ID, second.ID)
+	}
+	if q.Len() != 0 {
+		t.Fatalf("drain left %d task(s) behind", q.Len())
+	}
+}
+
+func TestQueueDrainEmpty(t *testing.T) {
+	q := New(8)
+	if got := q.Drain(); got != nil {
+		t.Fatalf("drain of empty queue = %v, want nil", got)
+	}
+}
+
 func TestQueueFull(t *testing.T) {
 	q := New(1)
 	base := mustTime()

@@ -83,6 +83,11 @@ type Dispatcher struct {
 	cache   map[string]windowEntry
 	hits    uint64
 	misses  uint64
+	// onDispatched is invoked after each task in a tick batch is handed
+	// off. It is nil in production and exists only so tests can inject
+	// work (such as a concurrent enqueue) between iterations of a batch
+	// without racing the real scheduler loop.
+	onDispatched func(model.Task)
 }
 
 // New creates a dispatcher.
@@ -112,25 +117,45 @@ func New(
 // of the batch so a task that becomes due mid-batch waits for the next
 // window.
 func (d *Dispatcher) Tick(ctx context.Context, win clock.Window) error {
+	// Drain the queue once so the batch membership is fixed at this
+	// instant. A task enqueued by a concurrent publish after the drain is
+	// not part of the snapshot and stays queued for the next window,
+	// which keeps the dispatch window snapshot-consistent for the whole
+	// batch instead of letting a half batch slip in mid-flight.
+	batch := d.queue.Drain()
+	if len(batch) == 0 {
+		return nil
+	}
+	executors := d.leases.Executors()
+	if len(executors) == 0 {
+		// No executor to receive the batch: put everything back and let
+		// the next tick retry once a lease appears.
+		d.requeue(batch)
+		return nil
+	}
+	executor := executors[0]
 	var firstErr error
-	for {
-		task, ok := d.queue.Next()
-		if !ok {
-			break
-		}
+	for i, task := range batch {
 		if !win.Contains(task.DueAt) {
-			_ = d.queue.Enqueue(task)
+			// The batch is ordered by due time, so once a task is out of
+			// the window everything after it is too: requeue the remaining
+			// tail for a later window and stop dispatching this batch.
+			d.requeue(batch[i:])
 			break
 		}
-		executors := d.leases.Executors()
-		if len(executors) == 0 {
-			break
-		}
-		if err := d.dispatchOne(ctx, executors[0], task); err != nil && firstErr == nil {
+		if err := d.dispatchOne(ctx, executor, task); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
+}
+
+// requeue pushes the tasks back into the queue, preserving their due
+// order so the next tick sees the same relative ordering.
+func (d *Dispatcher) requeue(tasks []model.Task) {
+	for _, task := range tasks {
+		_ = d.queue.Enqueue(task)
+	}
 }
 
 // Dispatch delivers a batch of tasks to the leased executors. The
@@ -230,6 +255,9 @@ func (d *Dispatcher) dispatchOne(ctx context.Context, executor model.ExecutorID,
 	}
 	d.reg.SetState(task.ID, model.TaskDispatched)
 	d.metrics.Dispatched()
+	if d.onDispatched != nil {
+		d.onDispatched(task)
+	}
 	return nil
 }
 
@@ -270,4 +298,11 @@ func (d *Dispatcher) CacheStats() (hits, misses uint64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.hits, d.misses
+}
+
+// SetOnDispatched installs a callback invoked after each task in a tick
+// batch is handed off. It is intended for tests that must simulate a
+// concurrent enqueue arriving between two dispatches of the same batch.
+func (d *Dispatcher) SetOnDispatched(fn func(model.Task)) {
+	d.onDispatched = fn
 }
