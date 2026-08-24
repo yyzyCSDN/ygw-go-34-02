@@ -50,15 +50,18 @@ func (r *Registry) Register(task model.Task) {
 	r.versions[task.Group]++
 }
 
-// Delete removes a task from the table and bumps its group version.
+// Delete removes a task from the table and bumps its group version so
+// downstream snapshots (such as the dispatcher cache) cannot keep serving
+// a task that was taken offline.
 func (r *Registry) Delete(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	_, ok := r.byID[id]
+	task, ok := r.byID[id]
 	if !ok {
 		return
 	}
 	delete(r.byID, id)
+	r.versions[task.Group]++
 }
 
 // Get returns the task for an id.

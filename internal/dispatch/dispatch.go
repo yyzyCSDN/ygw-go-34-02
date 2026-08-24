@@ -181,7 +181,11 @@ func (d *Dispatcher) ordered(tasks []model.Task) []model.Task {
 	version := d.reg.Version(tasks[0].Group)
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if entry, ok := d.cache[tasks[0].Group]; ok {
+	// A cached snapshot is only reusable while the group version is
+	// unchanged. Any mutation that takes a task offline bumps the
+	// version, so a stale entry is dropped and rebuilt from the live
+	// table instead of resending a removed task id.
+	if entry, ok := d.cache[tasks[0].Group]; ok && entry.version == version {
 		d.hits++
 		return entry.tasks
 	}
