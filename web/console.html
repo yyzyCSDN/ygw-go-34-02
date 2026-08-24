@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JobScheduler Console</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; background: #f6f8fa; color: #1f2328; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 22px; }
+  .card { background: #fff; border: 1px solid #d8dee4; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input[type=text], input[type=number] { flex: 1; min-width: 120px; padding: 8px; border: 1px solid #d8dee4; border-radius: 6px; }
+  button { padding: 8px 14px; border: 1px solid #d8dee4; border-radius: 6px; background: #f6f8fa; cursor: pointer; }
+  button.primary { background: #0969da; border-color: #0969da; color: #fff; }
+  pre { background: #0d1117; color: #e6edf3; padding: 12px; border-radius: 6px; overflow: auto; max-height: 420px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #d8dee4; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>JobScheduler Console</h1>
+
+  <div class="card">
+    <h2>发布任务</h2>
+    <div class="row">
+      <input id="group" type="text" placeholder="任务组，如 batch/etl">
+      <input id="payload" type="text" placeholder="任务内容">
+      <input id="due" type="number" value="0" placeholder="延后毫秒">
+      <input id="deps" type="text" placeholder="依赖任务 ID，逗号分隔">
+      <button id="publishBtn" class="primary">发布</button>
+    </div>
+    <p id="pubResult" style="min-height:1em;color:#57606a;font-size:13px;"></p>
+  </div>
+
+  <div class="card">
+    <h2>注册执行器</h2>
+    <div class="row">
+      <input id="execId" type="text" placeholder="执行器 ID">
+      <button id="execBtn">注册</button>
+      <button id="statusBtn">刷新状态</button>
+    </div>
+    <p id="execResult" style="min-height:1em;color:#57606a;font-size:13px;"></p>
+  </div>
+
+  <div class="card">
+    <h2>任务与执行器状态</h2>
+    <pre id="status">（点击刷新状态）</pre>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+
+  async function post(url, body) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    return res.json();
+  }
+
+  async function refreshStatus() {
+    try {
+      const res = await fetch("/api/status");
+      $("status").textContent = JSON.stringify(await res.json(), null, 2);
+    } catch (err) {
+      $("status").textContent = "状态获取失败: " + err.message;
+    }
+  }
+
+  $("publishBtn").addEventListener("click", async () => {
+    const group = $("group").value.trim();
+    if (!group) { $("pubResult").textContent = "请填写任务组"; return; }
+    const deps = $("deps").value.split(",").map(s => s.trim()).filter(Boolean);
+    try {
+      const data = await post("/api/publish", {
+        group: group,
+        payload: $("payload").value,
+        due_after_ms: parseInt($("due").value || "0", 10),
+        depends_on: deps
+      });
+      $("pubResult").textContent = "已接受，序列号 " + data.sequence + "，任务 " + data.task_id;
+      refreshStatus();
+    } catch (err) {
+      $("pubResult").textContent = "发布失败: " + err.message;
+    }
+  });
+
+  $("execBtn").addEventListener("click", async () => {
+    const id = $("execId").value.trim();
+    if (!id) { $("execResult").textContent = "请填写执行器 ID"; return; }
+    try {
+      const data = await post("/executors", { id: id });
+      $("execResult").textContent = "执行器 " + data.executor + " 已注册，槽位 " + data.slot;
+      refreshStatus();
+    } catch (err) {
+      $("execResult").textContent = "注册失败: " + err.message;
+    }
+  });
+
+  $("statusBtn").addEventListener("click", refreshStatus);
+  refreshStatus();
+})();
+</script>
+</body>
+</html>
