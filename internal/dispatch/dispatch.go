@@ -73,17 +73,18 @@ type windowEntry struct {
 
 // Dispatcher schedules queued tasks onto leased executors.
 type Dispatcher struct {
-	queue   *queue.Queue
-	store   *store.Store
-	reg     *registry.Registry
-	leases  *lease.Manager
-	execs   *exec.Manager
-	metrics *metric.Metrics
-	flow    *flow.Limiter
-	mu      sync.Mutex
-	cache   map[string]windowEntry
-	hits    uint64
-	misses  uint64
+	queue    *queue.Queue
+	store    *store.Store
+	reg      *registry.Registry
+	leases   *lease.Manager
+	execs    *exec.Manager
+	metrics  *metric.Metrics
+	flow     *flow.Limiter
+	mu       sync.Mutex
+	cache    map[string]windowEntry
+	replaying map[model.ExecutorID]struct{}
+	hits     uint64
+	misses   uint64
 }
 
 // New creates a dispatcher.
@@ -241,9 +242,45 @@ func (d *Dispatcher) CatchUp(ctx context.Context, executor model.ExecutorID, fro
 	return d.CatchUpFrom(ctx, executor, from, d.store)
 }
 
-// CatchUpFrom opens the runner replay window, reads missed tasks from
-// the given source and replays them ahead of live dispatches.
+// CatchUpFrom merges catch-up and live dispatch into a single ordered path.
+// It opens the executor's replay window so any live dispatch the ticker
+// issues concurrently is buffered, replays the missed (old) tasks ahead of
+// that buffer, then closes the window to flush the buffered live (new)
+// tasks behind them. Without this the two paths race on the runner queue and
+// a live task can be processed before an older task it depends on.
+//
+// A second catch-up against an executor whose window is already open is
+// rejected with ErrAlreadyReplaying so two replay streams never interleave.
 func (d *Dispatcher) CatchUpFrom(ctx context.Context, executor model.ExecutorID, from int64, source TaskSource) error {
+	d.mu.Lock()
+	if d.replaying == nil {
+		d.replaying = make(map[model.ExecutorID]struct{})
+	}
+	if _, open := d.replaying[executor]; open {
+		d.mu.Unlock()
+		return ErrAlreadyReplaying
+	}
+	d.replaying[executor] = struct{}{}
+	d.mu.Unlock()
+
+	defer func() {
+		d.mu.Lock()
+		delete(d.replaying, executor)
+		d.mu.Unlock()
+	}()
+
+	opened, err := d.execs.BeginReplay(executor)
+	if err != nil {
+		return err
+	}
+	if !opened {
+		// Another path already owns the window; do not close it from here.
+		return ErrAlreadyReplaying
+	}
+	// Only this path owns the window; closing it flushes the buffered live
+	// dispatches behind the replayed tasks.
+	defer d.execs.EndReplay(executor)
+
 	missed, err := source.Since(from)
 	if err != nil {
 		return err
@@ -251,7 +288,7 @@ func (d *Dispatcher) CatchUpFrom(ctx context.Context, executor model.ExecutorID,
 	for _, task := range missed {
 		inst := model.NewInstance(task, 1)
 		inst.DedupeKey = task.DedupeKey
-		if err := d.execs.Dispatch(executor, inst); err != nil {
+		if err := d.execs.ReplayWrite(executor, inst); err != nil {
 			return err
 		}
 	}
